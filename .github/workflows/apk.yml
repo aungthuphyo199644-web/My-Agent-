@@ -1,0 +1,855 @@
+name: Build AI Agent APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write app source
+        run: |
+          cat > settings.gradle <<'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "AIAgent"
+          include ':app'
+          EOF_FILE
+
+          cat > gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          EOF_FILE
+
+          mkdir -p app
+          cat > app/build.gradle <<'EOF_FILE'
+          plugins {
+              id 'com.android.application' version '8.5.2'
+          }
+
+          android {
+              namespace 'com.royal.aiagent'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.royal.aiagent'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              signingConfigs {
+                  agent {
+                      storeFile file('../agent.jks')
+                      storePassword 'aiagent123'
+                      keyAlias 'agent'
+                      keyPassword 'aiagent123'
+                  }
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      signingConfig signingConfigs.agent
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              lint {
+                  abortOnError false
+                  checkReleaseBuilds false
+              }
+          }
+          EOF_FILE
+
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@android:drawable/sym_action_chat"
+                  android:label="AI Agent"
+                  android:theme="@android:style/Theme.DeviceDefault.Light">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".ReplyService"
+                      android:exported="true"
+                      android:label="AI Agent"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService" />
+                      </intent-filter>
+                  </service>
+              </application>
+          </manifest>
+          EOF_FILE
+
+          mkdir -p app/src/main/java/com/royal/aiagent
+          cat > app/src/main/java/com/royal/aiagent/Store.java <<'EOF_FILE'
+          package com.royal.aiagent;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+
+          /** App settings and the reply log, kept in SharedPreferences. */
+          public class Store {
+
+              public static final String PKG_VIBER = "com.viber.voip";
+              public static final String PKG_MESSENGER = "com.facebook.orca";
+              public static final String PKG_MESSENGER_LITE = "com.facebook.mlite";
+
+              public static final String DEFAULT_MODEL = "google/gemini-2.5-flash";
+
+              public static final String DEFAULT_PROMPT =
+                      "သင်က \"GG Game Shop\" ရဲ့ အရောင်းဝန်ထမ်းပါ။ မြန်မာလို ယဉ်ယဉ်ကျေးကျေး၊ တိုတိုရှင်းရှင်း ဖြေပါ။\n\n"
+                      + "ရောင်းတာ: Mobile Legends Diamonds, PUBG UC top-up\n\n"
+                      + "ဈေးနှုန်း:\n"
+                      + "- ML 86 Diamonds = ____ ကျပ်\n"
+                      + "- ML 172 Diamonds = ____ ကျပ်\n"
+                      + "- PUBG 60 UC = ____ ကျပ်\n"
+                      + "- PUBG 325 UC = ____ ကျပ်\n\n"
+                      + "ငွေလွှဲ: KBZPay ____ (နာမည် ____)\n\n"
+                      + "Order ယူပုံ: Game ID (ML ဆို Server ID ပါ) နဲ့ ဘယ်ပမာဏလဲ မေးပါ။ "
+                      + "ငွေလွှဲပြီး Screenshot ပို့ခိုင်းပါ။ Screenshot ပို့ပြီလို့ ပြောရင် \"စစ်ပြီး ခဏနေ ဖြည့်ပေးပါမယ်\" လို့ ပြောပါ။\n\n"
+                      + "စည်းကမ်း:\n"
+                      + "- ဈေးနှုန်းစာရင်းမှာ မပါတာကို ကိုယ့်ဘာသာ မခန့်မှန်းနဲ့။ မသိရင် \"Admin က ခဏနေ ပြန်ဖြေပေးပါမယ်\" လို့ ပြောပါ။\n"
+                      + "- သူငယ်ချင်း/မိသားစု စကားလို ဆိုင်နဲ့ လုံးဝမဆိုင်တဲ့ စာဆိုရင် SKIP ဆိုတဲ့ စာလုံးတစ်လုံးတည်းပဲ ပြန်ပါ။";
+
+              private static final int MAX_LOG_LINES = 60;
+
+              private final SharedPreferences p;
+
+              public Store(Context c) {
+                  p = c.getSharedPreferences("agent", Context.MODE_PRIVATE);
+              }
+
+              public SharedPreferences prefs() {
+                  return p;
+              }
+
+              public boolean enabled() {
+                  return p.getBoolean("enabled", false);
+              }
+
+              public String apiKey() {
+                  return p.getString("api_key", "").trim();
+              }
+
+              public String model() {
+                  String m = p.getString("model", DEFAULT_MODEL).trim();
+                  return m.isEmpty() ? DEFAULT_MODEL : m;
+              }
+
+              public String prompt() {
+                  String s = p.getString("prompt", DEFAULT_PROMPT);
+                  return s.trim().isEmpty() ? DEFAULT_PROMPT : s;
+              }
+
+              public boolean appEnabled(String pkg) {
+                  if (PKG_VIBER.equals(pkg)) return p.getBoolean("app_viber", true);
+                  if (PKG_MESSENGER.equals(pkg)) return p.getBoolean("app_messenger", true);
+                  if (PKG_MESSENGER_LITE.equals(pkg)) return p.getBoolean("app_messenger_lite", true);
+                  return false;
+              }
+
+              public boolean ignoreGroups() {
+                  return p.getBoolean("ignore_groups", true);
+              }
+
+              public int delaySec() {
+                  return Math.max(3, p.getInt("delay", 10));
+              }
+
+              public String keywords() {
+                  return p.getString("keywords", "");
+              }
+
+              public String skipNames() {
+                  return p.getString("skip_names", "");
+              }
+
+              /** True when no keywords are set, or the text contains one of them. */
+              public boolean matchesKeyword(String text) {
+                  String lower = text.toLowerCase(Locale.ROOT);
+                  boolean any = false;
+                  for (String k : keywords().split("[,၊\\n]")) {
+                      String kw = k.trim().toLowerCase(Locale.ROOT);
+                      if (kw.isEmpty()) continue;
+                      any = true;
+                      if (lower.contains(kw)) return true;
+                  }
+                  return !any;
+              }
+
+              /** True when the sender's name matches one of the names the agent must never answer. */
+              public boolean isSkipped(String sender) {
+                  String s = sender.trim().toLowerCase(Locale.ROOT);
+                  for (String n : skipNames().split("[,၊\\n]")) {
+                      String name = n.trim().toLowerCase(Locale.ROOT);
+                      if (!name.isEmpty() && s.contains(name)) return true;
+                  }
+                  return false;
+              }
+
+              public static synchronized void log(Context c, String line) {
+                  SharedPreferences sp = c.getSharedPreferences("agent", Context.MODE_PRIVATE);
+                  String time = new SimpleDateFormat("MM-dd HH:mm", Locale.US).format(new Date());
+                  String old = sp.getString("log", "");
+                  String[] lines = old.isEmpty() ? new String[0] : old.split("\n");
+                  StringBuilder b = new StringBuilder();
+                  b.append(time).append("  ").append(line.replace('\n', ' '));
+                  for (int i = 0; i < lines.length && i < MAX_LOG_LINES - 1; i++) {
+                      b.append('\n').append(lines[i]);
+                  }
+                  sp.edit().putString("log", b.toString()).apply();
+              }
+
+              public static String readLog(Context c) {
+                  return c.getSharedPreferences("agent", Context.MODE_PRIVATE).getString("log", "");
+              }
+
+              public static void clearLog(Context c) {
+                  c.getSharedPreferences("agent", Context.MODE_PRIVATE).edit().remove("log").apply();
+              }
+          }
+          EOF_FILE
+
+          mkdir -p app/src/main/java/com/royal/aiagent
+          cat > app/src/main/java/com/royal/aiagent/AiClient.java <<'EOF_FILE'
+          package com.royal.aiagent;
+
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          import java.io.ByteArrayOutputStream;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.nio.charset.StandardCharsets;
+          import java.util.List;
+
+          /** Sends a chat to OpenRouter and returns the AI's reply text. */
+          public class AiClient {
+
+              private static final String URL_CHAT = "https://openrouter.ai/api/v1/chat/completions";
+
+              /**
+               * @param history list of {role, content} pairs, role is "user" or "assistant"
+               */
+              public static String ask(String apiKey, String model, String system, List<String[]> history)
+                      throws Exception {
+                  if (apiKey == null || apiKey.isEmpty()) {
+                      throw new Exception("OpenRouter API key မထည့်ရသေးပါ");
+                  }
+
+                  JSONArray msgs = new JSONArray();
+                  msgs.put(new JSONObject().put("role", "system").put("content", system));
+                  for (String[] h : history) {
+                      msgs.put(new JSONObject().put("role", h[0]).put("content", h[1]));
+                  }
+                  JSONObject body = new JSONObject();
+                  body.put("model", model);
+                  body.put("messages", msgs);
+                  body.put("max_tokens", 500);
+                  byte[] out = body.toString().getBytes(StandardCharsets.UTF_8);
+
+                  HttpURLConnection c = (HttpURLConnection) new URL(URL_CHAT).openConnection();
+                  try {
+                      c.setRequestMethod("POST");
+                      c.setConnectTimeout(20000);
+                      c.setReadTimeout(60000);
+                      c.setDoOutput(true);
+                      c.setRequestProperty("Authorization", "Bearer " + apiKey);
+                      c.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                      c.setRequestProperty("X-Title", "AI Agent");
+                      OutputStream os = c.getOutputStream();
+                      os.write(out);
+                      os.close();
+
+                      int code = c.getResponseCode();
+                      InputStream is = code < 400 ? c.getInputStream() : c.getErrorStream();
+                      String resp = readAll(is);
+                      if (code >= 400) {
+                          throw new Exception("HTTP " + code + ": " + cut(resp, 200));
+                      }
+                      JSONObject json = new JSONObject(resp);
+                      return json.getJSONArray("choices")
+                              .getJSONObject(0)
+                              .getJSONObject("message")
+                              .getString("content")
+                              .trim();
+                  } finally {
+                      c.disconnect();
+                  }
+              }
+
+              private static String readAll(InputStream is) throws Exception {
+                  if (is == null) return "";
+                  ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                  byte[] buf = new byte[4096];
+                  int n;
+                  while ((n = is.read(buf)) > 0) bos.write(buf, 0, n);
+                  is.close();
+                  return new String(bos.toByteArray(), StandardCharsets.UTF_8);
+              }
+
+              static String cut(String s, int max) {
+                  return s.length() <= max ? s : s.substring(0, max) + "…";
+              }
+          }
+          EOF_FILE
+
+          mkdir -p app/src/main/java/com/royal/aiagent
+          cat > app/src/main/java/com/royal/aiagent/ReplyService.java <<'EOF_FILE'
+          package com.royal.aiagent;
+
+          import android.app.Notification;
+          import android.app.PendingIntent;
+          import android.app.RemoteInput;
+          import android.content.Intent;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.os.Parcelable;
+          import android.service.notification.NotificationListenerService;
+          import android.service.notification.StatusBarNotification;
+
+          import java.util.ArrayList;
+          import java.util.HashMap;
+          import java.util.LinkedList;
+          import java.util.List;
+          import java.util.Map;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
+
+          /**
+           * Reads incoming Viber / Messenger notifications, asks the AI for an answer,
+           * and sends it back through the notification's own "Reply" action.
+           */
+          public class ReplyService extends NotificationListenerService {
+
+              private static final long ACTIVE_WINDOW_MS = 30L * 60 * 1000; // keywords not needed for 30 min after a reply
+              private static final int MAX_HISTORY = 20;                    // messages remembered per customer
+
+              private final Handler main = new Handler(Looper.getMainLooper());
+              private final ExecutorService worker = Executors.newSingleThreadExecutor();
+
+              private final Map<String, Pending> pending = new HashMap<>();
+              private final Map<String, LinkedList<String[]>> history = new HashMap<>();
+              private final Map<String, Long> lastActive = new HashMap<>();
+              private final Map<String, String> lastSeen = new HashMap<>();
+              private final Map<String, String> lastReply = new HashMap<>();
+
+              /** Messages from one sender collected during the delay, answered together. */
+              private static class Pending {
+                  final StringBuilder text = new StringBuilder();
+                  Notification.Action action;
+                  String sender;
+              }
+
+              @Override
+              public void onNotificationPosted(StatusBarNotification sbn) {
+                  try {
+                      handle(sbn);
+                  } catch (Throwable t) {
+                      Store.log(this, "Error: " + t);
+                  }
+              }
+
+              private void handle(StatusBarNotification sbn) {
+                  Store s = new Store(this);
+                  if (!s.enabled()) return;
+
+                  String pkg = sbn.getPackageName();
+                  if (!s.appEnabled(pkg)) return;
+
+                  Notification n = sbn.getNotification();
+                  if (n == null || (n.flags & Notification.FLAG_GROUP_SUMMARY) != 0 || sbn.isOngoing()) return;
+
+                  Notification.Action action = findReplyAction(n);
+                  if (action == null) return;
+
+                  Bundle ex = n.extras;
+                  String sender = str(ex.getCharSequence(Notification.EXTRA_TITLE));
+                  String text = str(ex.getCharSequence(Notification.EXTRA_TEXT));
+
+                  boolean group = ex.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE) != null;
+                  if (Build.VERSION.SDK_INT >= 28
+                          && ex.getBoolean(Notification.EXTRA_IS_GROUP_CONVERSATION, false)) {
+                      group = true;
+                  }
+
+                  // Chat-style notifications: use the newest message, and ignore it if we sent it.
+                  Parcelable[] msgs = ex.getParcelableArray(Notification.EXTRA_MESSAGES);
+                  if (msgs != null && msgs.length > 0 && msgs[msgs.length - 1] instanceof Bundle) {
+                      Bundle last = (Bundle) msgs[msgs.length - 1];
+                      CharSequence t = last.getCharSequence("text");
+                      if (t != null) text = t.toString();
+                      boolean hasSender = last.getCharSequence("sender") != null || last.containsKey("sender_person");
+                      if (!hasSender) return; // our own message
+                  }
+
+                  sender = sender.trim();
+                  text = text.trim();
+                  if (sender.isEmpty() || text.isEmpty()) return;
+                  if (group && s.ignoreGroups()) return;
+                  if (s.isSkipped(sender)) return;
+
+                  String key = pkg + "|" + sender;
+                  if (text.equals(lastReply.get(key))) return; // our reply echoed back
+                  if (text.equals(lastSeen.get(key))) return;  // same notification updated again
+                  lastSeen.put(key, text);
+
+                  long now = System.currentTimeMillis();
+                  Long la = lastActive.get(key);
+                  boolean active = la != null && now - la < ACTIVE_WINDOW_MS;
+                  if (!active && !s.matchesKeyword(text)) return;
+
+                  Pending p = pending.get(key);
+                  boolean schedule = false;
+                  if (p == null) {
+                      p = new Pending();
+                      p.sender = sender;
+                      pending.put(key, p);
+                      schedule = true;
+                  }
+                  if (p.text.length() > 0) p.text.append('\n');
+                  p.text.append(text);
+                  p.action = action;
+
+                  if (schedule) {
+                      main.postDelayed(() -> fire(key), s.delaySec() * 1000L);
+                  }
+              }
+
+              private void fire(String key) {
+                  Pending p = pending.remove(key);
+                  if (p == null) return;
+                  Store s = new Store(this);
+                  if (!s.enabled()) return;
+
+                  LinkedList<String[]> h = history.get(key);
+                  if (h == null) {
+                      h = new LinkedList<>();
+                      history.put(key, h);
+                  }
+                  final LinkedList<String[]> hist = h;
+                  final String userText = p.text.toString();
+                  final String apiKey = s.apiKey();
+                  final String model = s.model();
+                  final String prompt = s.prompt();
+
+                  worker.submit(() -> {
+                      List<String[]> copy;
+                      synchronized (hist) {
+                          hist.add(new String[]{"user", userText});
+                          while (hist.size() > MAX_HISTORY) hist.removeFirst();
+                          copy = new ArrayList<>(hist);
+                      }
+                      String answer;
+                      try {
+                          answer = AiClient.ask(apiKey, model, prompt, copy);
+                      } catch (Exception e) {
+                          Store.log(this, "❌ " + p.sender + ": " + e.getMessage());
+                          return;
+                      }
+                      if (answer.isEmpty() || answer.replaceAll("[^A-Za-z]", "").equalsIgnoreCase("SKIP")) {
+                          Store.log(this, "⏭ " + p.sender + ": (မဖြေ) " + AiClient.cut(userText, 60));
+                          return;
+                      }
+                      synchronized (hist) {
+                          hist.add(new String[]{"assistant", answer});
+                      }
+                      final String reply = answer;
+                      main.post(() -> send(key, p, reply));
+                  });
+              }
+
+              private void send(String key, Pending p, String reply) {
+                  try {
+                      RemoteInput[] inputs = p.action.getRemoteInputs();
+                      Intent intent = new Intent();
+                      Bundle results = new Bundle();
+                      for (RemoteInput ri : inputs) {
+                          results.putCharSequence(ri.getResultKey(), reply);
+                      }
+                      RemoteInput.addResultsToIntent(inputs, intent, results);
+                      p.action.actionIntent.send(this, 0, intent);
+
+                      lastReply.put(key, reply);
+                      lastActive.put(key, System.currentTimeMillis());
+                      Store.log(this, "✅ " + p.sender + ": " + AiClient.cut(p.text.toString(), 40)
+                              + "  →  " + AiClient.cut(reply, 80));
+                  } catch (PendingIntent.CanceledException e) {
+                      Store.log(this, "❌ " + p.sender + ": Reply ပို့မရ (notification ပိတ်သွားပြီ)");
+                  }
+              }
+
+              /** Finds the notification action that accepts typed text (the "Reply" button). */
+              private static Notification.Action findReplyAction(Notification n) {
+                  if (n.actions != null) {
+                      for (Notification.Action a : n.actions) {
+                          if (isReply(a)) return a;
+                      }
+                  }
+                  for (Notification.Action a : new Notification.WearableExtender(n).getActions()) {
+                      if (isReply(a)) return a;
+                  }
+                  return null;
+              }
+
+              private static boolean isReply(Notification.Action a) {
+                  if (a == null || a.actionIntent == null) return false;
+                  RemoteInput[] r = a.getRemoteInputs();
+                  if (r == null) return false;
+                  for (RemoteInput ri : r) {
+                      if (ri.getAllowFreeFormInput()) return true;
+                  }
+                  return false;
+              }
+
+              private static String str(CharSequence cs) {
+                  return cs == null ? "" : cs.toString();
+              }
+          }
+          EOF_FILE
+
+          mkdir -p app/src/main/java/com/royal/aiagent
+          cat > app/src/main/java/com/royal/aiagent/MainActivity.java <<'EOF_FILE'
+          package com.royal.aiagent;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.text.InputType;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.CheckBox;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.Switch;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          /** Settings screen: turn the agent on/off, set the AI key, prompt and filters, view the reply log. */
+          public class MainActivity extends Activity {
+
+              private Store store;
+              private LinearLayout root;
+
+              private TextView status;
+              private Switch enabled;
+              private EditText apiKey, model, delay, keywords, skipNames, prompt, testMsg;
+              private CheckBox viber, messenger, messengerLite, ignoreGroups;
+              private TextView testResult, log;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  store = new Store(this);
+
+                  ScrollView scroll = new ScrollView(this);
+                  root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  int pad = dp(16);
+                  root.setPadding(pad, pad, pad, dp(48));
+                  scroll.addView(root);
+                  setContentView(scroll);
+
+                  TextView title = text("🤖 AI Agent", 24);
+                  title.setTypeface(Typeface.DEFAULT_BOLD);
+                  root.addView(title);
+                  root.addView(text("Viber / Messenger စာဝင်တာကို AI နဲ့ အော်တို ပြန်ဖြေပေးပါတယ်", 14));
+
+                  status = text("", 15);
+                  status.setPadding(0, dp(12), 0, dp(4));
+                  root.addView(status);
+
+                  button("① Notification ဖတ်ခွင့် ပေးရန်", v ->
+                          startActivity(new Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")));
+                  button("② Battery မပိတ်အောင် လုပ်ရန်", v -> {
+                      try {
+                          startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                      } catch (Exception e) {
+                          startActivity(new Intent(Settings.ACTION_SETTINGS));
+                      }
+                  });
+
+                  header("ဖွင့်/ပိတ်");
+                  enabled = new Switch(this);
+                  enabled.setText("Agent ဖွင့်မယ်");
+                  enabled.setTextSize(17);
+                  enabled.setPadding(0, dp(8), 0, dp(8));
+                  root.addView(enabled);
+
+                  header("AI");
+                  apiKey = field("OpenRouter API key (sk-or-...)", false);
+                  apiKey.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+                  model = field("Model (ဥပမာ google/gemini-2.5-flash)", false);
+
+                  header("ဘယ် app တွေ ဖြေမလဲ");
+                  viber = check("Viber");
+                  messenger = check("Messenger");
+                  messengerLite = check("Messenger Lite");
+                  ignoreGroups = check("Group chat တွေ မဖြေနဲ့");
+
+                  header("စည်းကမ်း");
+                  delay = field("စောင့်ချိန် (စက္ကန့်) — ဥပမာ 10", false);
+                  delay.setInputType(InputType.TYPE_CLASS_NUMBER);
+                  keywords = field("Keyword ပါမှ ဖြေ (ကော်မာခြား၊ အလွတ်ထားရင် အကုန်ဖြေ) — ဥပမာ ဈေး,diamond,uc", false);
+                  skipNames = field("ဒီနာမည်တွေ ဘယ်တော့မှ မဖြေနဲ့ (ကော်မာခြား) — ဥပမာ အမေ,မိန်းမ", false);
+
+                  header("ဆိုင်အချက်အလက် / Prompt");
+                  prompt = field("AI ကို ဘယ်လိုပြောရမလဲ", true);
+
+                  Button save = button("💾 သိမ်းမယ်", v -> save());
+                  save.setBackgroundColor(Color.parseColor("#2E7D32"));
+                  save.setTextColor(Color.WHITE);
+
+                  header("AI စမ်းမေးကြည့်ရန်");
+                  testMsg = field("Customer လို စာရိုက်ကြည့်ပါ — ဥပမာ ML 86 ဘယ်လောက်လဲ", false);
+                  button("▶ စမ်းမယ်", v -> test());
+                  testResult = text("", 15);
+                  testResult.setTextIsSelectable(true);
+                  root.addView(testResult);
+
+                  header("ဖြေခဲ့တဲ့ စာရင်း (Log)");
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  Button refresh = new Button(this);
+                  refresh.setText("🔄 ပြန်ကြည့်");
+                  refresh.setOnClickListener(v -> refreshLog());
+                  Button clear = new Button(this);
+                  clear.setText("🗑 ဖျက်");
+                  clear.setOnClickListener(v -> {
+                      Store.clearLog(this);
+                      refreshLog();
+                  });
+                  row.addView(refresh);
+                  row.addView(clear);
+                  root.addView(row);
+                  log = text("", 13);
+                  log.setTextIsSelectable(true);
+                  root.addView(log);
+
+                  load();
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  refreshStatus();
+                  refreshLog();
+              }
+
+              private void load() {
+                  SharedPreferences p = store.prefs();
+                  enabled.setChecked(store.enabled());
+                  apiKey.setText(store.apiKey());
+                  model.setText(store.model());
+                  viber.setChecked(p.getBoolean("app_viber", true));
+                  messenger.setChecked(p.getBoolean("app_messenger", true));
+                  messengerLite.setChecked(p.getBoolean("app_messenger_lite", true));
+                  ignoreGroups.setChecked(store.ignoreGroups());
+                  delay.setText(String.valueOf(store.delaySec()));
+                  keywords.setText(store.keywords());
+                  skipNames.setText(store.skipNames());
+                  prompt.setText(store.prompt());
+              }
+
+              private void save() {
+                  int d;
+                  try {
+                      d = Integer.parseInt(delay.getText().toString().trim());
+                  } catch (NumberFormatException e) {
+                      d = 10;
+                  }
+                  store.prefs().edit()
+                          .putBoolean("enabled", enabled.isChecked())
+                          .putString("api_key", apiKey.getText().toString().trim())
+                          .putString("model", model.getText().toString().trim())
+                          .putBoolean("app_viber", viber.isChecked())
+                          .putBoolean("app_messenger", messenger.isChecked())
+                          .putBoolean("app_messenger_lite", messengerLite.isChecked())
+                          .putBoolean("ignore_groups", ignoreGroups.isChecked())
+                          .putInt("delay", Math.max(3, d))
+                          .putString("keywords", keywords.getText().toString())
+                          .putString("skip_names", skipNames.getText().toString())
+                          .putString("prompt", prompt.getText().toString())
+                          .apply();
+                  refreshStatus();
+                  Toast.makeText(this, "သိမ်းပြီးပါပြီ ✅", Toast.LENGTH_SHORT).show();
+              }
+
+              private void test() {
+                  save();
+                  final String msg = testMsg.getText().toString().trim();
+                  if (msg.isEmpty()) {
+                      testResult.setText("စာတစ်ခုခု ရိုက်ပါ");
+                      return;
+                  }
+                  testResult.setText("⏳ AI စဉ်းစားနေတယ်...");
+                  final String key = store.apiKey(), m = store.model(), pr = store.prompt();
+                  new Thread(() -> {
+                      String r;
+                      try {
+                          List<String[]> h = new ArrayList<>();
+                          h.add(new String[]{"user", msg});
+                          r = "🤖 " + AiClient.ask(key, m, pr, h);
+                      } catch (Exception e) {
+                          r = "❌ " + e.getMessage();
+                      }
+                      final String result = r;
+                      runOnUiThread(() -> testResult.setText(result));
+                  }).start();
+              }
+
+              private void refreshStatus() {
+                  String listeners = Settings.Secure.getString(getContentResolver(), "enabled_notification_listeners");
+                  boolean access = listeners != null && listeners.contains(getPackageName());
+                  StringBuilder b = new StringBuilder();
+                  b.append(access ? "✅ Notification ဖတ်ခွင့် ရပြီ" : "⚠️ Notification ဖတ်ခွင့် မပေးရသေး (① ကိုနှိပ်ပါ)");
+                  b.append('\n');
+                  b.append(store.apiKey().isEmpty() ? "⚠️ API key မထည့်ရသေး" : "✅ API key ထည့်ပြီး");
+                  b.append('\n');
+                  b.append(store.enabled() ? "🟢 Agent ဖွင့်ထားတယ်" : "⚪ Agent ပိတ်ထားတယ်");
+                  status.setText(b.toString());
+              }
+
+              private void refreshLog() {
+                  String l = Store.readLog(this);
+                  log.setText(l.isEmpty() ? "(မရှိသေးပါ)" : l);
+              }
+
+              // ---------- small UI helpers ----------
+
+              private int dp(int v) {
+                  return Math.round(v * getResources().getDisplayMetrics().density);
+              }
+
+              private TextView text(String s, int sp) {
+                  TextView t = new TextView(this);
+                  t.setText(s);
+                  t.setTextSize(sp);
+                  return t;
+              }
+
+              private void header(String s) {
+                  TextView t = text(s, 16);
+                  t.setTypeface(Typeface.DEFAULT_BOLD);
+                  t.setPadding(0, dp(20), 0, dp(4));
+                  root.addView(t);
+              }
+
+              private EditText field(String hint, boolean multiline) {
+                  EditText e = new EditText(this);
+                  e.setHint(hint);
+                  e.setTextSize(15);
+                  if (multiline) {
+                      e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+                      e.setMinLines(8);
+                      e.setGravity(Gravity.TOP | Gravity.START);
+                  } else {
+                      e.setInputType(InputType.TYPE_CLASS_TEXT);
+                  }
+                  root.addView(e);
+                  return e;
+              }
+
+              private CheckBox check(String label) {
+                  CheckBox c = new CheckBox(this);
+                  c.setText(label);
+                  c.setTextSize(15);
+                  root.addView(c);
+                  return c;
+              }
+
+              private Button button(String label, View.OnClickListener l) {
+                  Button btn = new Button(this);
+                  btn.setText(label);
+                  btn.setAllCaps(false);
+                  btn.setOnClickListener(l);
+                  root.addView(btn);
+                  return btn;
+              }
+          }
+          EOF_FILE
+
+          echo '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' | base64 -d > agent.jks
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build APK
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Publish APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk ai-agent.apk
+          gh release delete latest --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create latest ai-agent.apk --repo "$GITHUB_REPOSITORY" --title "AI Agent" --notes "ai-agent.apk ကို download ပြီး install လုပ်ပါ"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai-agent-apk
+          path: ai-agent.apk
